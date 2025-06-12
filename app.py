@@ -64,26 +64,55 @@ def compare_assortment(should_be_df, actual_df):
     if should_be_df is None or actual_df is None:
         return None, None, None
     
+    # Проверяем наличие колонки Describe в обеих таблицах
+    should_be_describe_col = None
+    actual_describe_col = None
+    
+    # Ищем колонку Describe (с учетом возможных вариантов названия)
+    for col in should_be_df.columns:
+        if 'describe' in col.lower() or 'описание' in col.lower():
+            should_be_describe_col = col
+            break
+    
+    for col in actual_df.columns:
+        if 'describe' in col.lower() or 'описание' in col.lower():
+            actual_describe_col = col
+            break
+    
+    if should_be_describe_col is None or actual_describe_col is None:
+        st.error(f"Колонка 'Describe' не найдена! Доступные колонки в обязательном ассортименте: {list(should_be_df.columns)}")
+        st.error(f"Доступные колонки в остатках: {list(actual_df.columns)}")
+        return None, None, None
+    
     # Получаем списки товаров по Describe
-    should_be_items = set(should_be_df['Describe'].dropna().str.strip())
-    actual_items = set(actual_df['Describe'].dropna().str.strip())
+    should_be_items = set(should_be_df[should_be_describe_col].dropna().astype(str).str.strip())
+    actual_items = set(actual_df[actual_describe_col].dropna().astype(str).str.strip())
     
     # Анализ
     missing_items = should_be_items - actual_items  # Должны быть, но нет
     extra_items = actual_items - should_be_items    # Есть, но не должны быть
     matching_items = should_be_items & actual_items # Совпадают
     
-    # Создаем детальные отчеты
-    missing_df = should_be_df[should_be_df['Describe'].isin(missing_items)][['ART', 'Describe', 'Название_бренда', 'Price:']]
+    # Создаем детальные отчеты с проверкой существования колонок
+    available_cols_should_be = [col for col in ['ART', 'Describe', 'Название_бренда', 'Price:'] if col in should_be_df.columns]
+    available_cols_actual = [col for col in ['Артикул', 'Describe', 'Магазинов с товаром'] if col in actual_df.columns]
     
-    extra_df = actual_df[actual_df['Describe'].isin(extra_items)][['Артикул', 'Describe', 'Магазинов с товаром']]
+    missing_df = should_be_df[should_be_df[should_be_describe_col].isin(missing_items)][available_cols_should_be]
     
-    matching_df = should_be_df[should_be_df['Describe'].isin(matching_items)][['ART', 'Describe', 'Название_бренда']]
-    matching_with_stock = matching_df.merge(
-        actual_df[['Describe', 'Магазинов с товаром']], 
-        on='Describe', 
-        how='left'
-    )
+    extra_df = actual_df[actual_df[actual_describe_col].isin(extra_items)][available_cols_actual]
+    
+    matching_df = should_be_df[should_be_df[should_be_describe_col].isin(matching_items)][available_cols_should_be]
+    
+    # Объединяем с данными об остатках если возможно
+    if 'Магазинов с товаром' in actual_df.columns:
+        matching_with_stock = matching_df.merge(
+            actual_df[[actual_describe_col, 'Магазинов с товаром']], 
+            left_on=should_be_describe_col,
+            right_on=actual_describe_col, 
+            how='left'
+        )
+    else:
+        matching_with_stock = matching_df
     
     return missing_df, extra_df, matching_with_stock
 
@@ -128,12 +157,18 @@ if st.sidebar.button("🔄 Загрузить и сравнить данные")
         # Загрузка обязательного ассортимента
         should_be_df = download_google_sheet(google_sheet_url)
         
+        if should_be_df is not None:
+            st.info(f"📋 Загружено из Google Sheets: {len(should_be_df)} строк")
+            st.info(f"Колонки: {list(should_be_df.columns)}")
+        
         # Загрузка остатков
         actual_df = None
         if uploaded_file is not None:
             try:
-                actual_df = pd.read_excel(uploaded_file)
-                actual_df = process_stock_data(actual_df)
+                raw_df = pd.read_excel(uploaded_file)
+                st.info(f"📊 Загружено из Excel: {len(raw_df)} строк")
+                st.info(f"Колонки: {list(raw_df.columns)}")
+                actual_df = process_stock_data(raw_df)
             except Exception as e:
                 st.error(f"Ошибка при чтении Excel файла: {str(e)}")
         
