@@ -281,7 +281,7 @@ def create_excel_download(df, filename):
         return ""
     
     output = BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Data')
     
     excel_data = output.getvalue()
