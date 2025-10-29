@@ -1,123 +1,282 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import requests
 from io import BytesIO
 import base64
+import plotly.express as px
+import plotly.graph_objects as go
+from datetime import datetime
+
+# ========================
+# НАСТРОЙКИ СТРАНИЦЫ
+# ========================
+st.set_page_config(
+    page_title="DDMRP Система управления остатками",
+    page_icon="📊",
+    layout="wide"
+)
+
+# ========================
+# ФУНКЦИИ ЗАГРУЗКИ ДАННЫХ
+# ========================
 
 def download_google_sheet(sheet_url):
-    """Загрузка данных из Google Sheets"""
+    """Загрузка торговой матрицы из Google Sheets"""
     try:
-        # Конвертируем ссылку в формат CSV экспорта
         if '/edit' in sheet_url:
             csv_url = sheet_url.replace('/edit?gid=', '/export?format=csv&gid=')
-            csv_url = csv_url.split('#')[0]  # Убираем якорь
+            csv_url = csv_url.split('#')[0]
         else:
             csv_url = sheet_url
         
         response = requests.get(csv_url)
         if response.status_code == 200:
-            return pd.read_csv(BytesIO(response.content))
+            df = pd.read_csv(BytesIO(response.content))
+            return df
         else:
-            st.error(f"Ошибка загрузки: {response.status_code}")
+            st.error(f"❌ Ошибка загрузки: {response.status_code}")
             return None
     except Exception as e:
-        st.error(f"Ошибка при загрузке Google Sheets: {str(e)}")
+        st.error(f"❌ Ошибка при загрузке Google Sheets: {str(e)}")
         return None
 
-def process_stock_data(df):
-    """Обработка данных остатков магазинов"""
-    if df is None or df.empty:
-        return None
-    
-    # Найдем колонки с магазинами (начинаются с "Маг.")
-    store_columns = [col for col in df.columns if col.startswith('Маг.')]
-    
-    # Создаем сводную таблицу по наличию товаров
-    result = []
-    for _, row in df.iterrows():
-        describe = row.get('Describe', '')
-        if pd.isna(describe) or describe == '':
-            continue
-            
-        # Считаем в скольких магазинах есть товар
-        in_stock_count = 0
-        stores_with_stock = []
-        
-        for store_col in store_columns:
-            stock_value = row.get(store_col, '')
-            if not pd.isna(stock_value) and str(stock_value).strip() != '' and str(stock_value) != '0':
-                in_stock_count += 1
-                stores_with_stock.append(store_col)
-        
-        result.append({
-            'Артикул': row.get('Артикул', ''),
-            'Describe': describe,
-            'Магазинов с товаром': in_stock_count,
-            'Всего магазинов': len(store_columns),
-            'Список магазинов': ', '.join(stores_with_stock)
-        })
-    
-    return pd.DataFrame(result)
 
-def compare_assortment(should_be_df, actual_df):
-    """Сравнение ассортимента"""
-    if should_be_df is None or actual_df is None:
-        return None, None, None
+def load_stock_file(uploaded_file):
+    """Загрузка файла остатков Excel"""
+    try:
+        df = pd.read_excel(uploaded_file)
+        
+        # Маппинг колонок
+        column_mapping = {
+            'Art': 'Article',
+            'Magazin': 'Store_ID',
+            'Describe': 'Describe',
+            'к-во': 'Current_Stock',
+            'Model': 'Model'
+        }
+        
+        df = df.rename(columns=column_mapping)
+        
+        # Проверка обязательных колонок
+        required_cols = ['Article', 'Store_ID', 'Describe', 'Current_Stock']
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        
+        if missing_cols:
+            st.error(f"❌ Отсутствуют обязательные колонки: {missing_cols}")
+            return None
+        
+        # Очистка данных
+        df['Current_Stock'] = pd.to_numeric(df['Current_Stock'], errors='coerce').fillna(0)
+        df['Store_ID'] = df['Store_ID'].astype(str).str.strip()
+        df['Article'] = df['Article'].astype(str).str.strip()
+        
+        return df
     
-    # Проверяем наличие колонки Describe в обеих таблицах
-    should_be_describe_col = None
-    actual_describe_col = None
+    except Exception as e:
+        st.error(f"❌ Ошибка при загрузке Excel: {str(e)}")
+        return None
+
+
+def validate_matrix(df):
+    """Валидация торговой матрицы"""
+    required_cols = ['Article', 'Describe', 'Store_ID', 'Red_Zone', 'Yellow_Zone', 'Green_Zone']
+    missing_cols = [col for col in required_cols if col not in df.columns]
     
-    # Ищем колонку Describe (с учетом возможных вариантов названия)
-    for col in should_be_df.columns:
-        if 'describe' in col.lower() or 'описание' in col.lower():
-            should_be_describe_col = col
-            break
+    if missing_cols:
+        st.error(f"❌ В торговой матрице отсутствуют колонки: {missing_cols}")
+        return False
     
-    for col in actual_df.columns:
-        if 'describe' in col.lower() or 'описание' in col.lower():
-            actual_describe_col = col
-            break
+    # Проверка типов данных
+    df['Red_Zone'] = pd.to_numeric(df['Red_Zone'], errors='coerce')
+    df['Yellow_Zone'] = pd.to_numeric(df['Yellow_Zone'], errors='coerce')
+    df['Green_Zone'] = pd.to_numeric(df['Green_Zone'], errors='coerce')
+    df['Store_ID'] = df['Store_ID'].astype(str).str.strip()
+    df['Article'] = df['Article'].astype(str).str.strip()
     
-    if should_be_describe_col is None or actual_describe_col is None:
-        st.error(f"Колонка 'Describe' не найдена! Доступные колонки в обязательном ассортименте: {list(should_be_df.columns)}")
-        st.error(f"Доступные колонки в остатках: {list(actual_df.columns)}")
-        return None, None, None
+    # Проверка на пустые значения
+    if df[required_cols].isnull().any().any():
+        st.warning("⚠️ В торговой матрице есть пустые значения в обязательных полях")
     
-    # Получаем списки товаров по Describe
-    should_be_items = set(should_be_df[should_be_describe_col].dropna().astype(str).str.strip())
-    actual_items = set(actual_df[actual_describe_col].dropna().astype(str).str.strip())
+    return True
+
+
+# ========================
+# DDMRP ЛОГИКА
+# ========================
+
+def calculate_ddmrp_status(matrix_df, stock_df):
+    """
+    Расчет статуса буферов DDMRP для каждого товара в каждом магазине
+    """
+    # Объединяем матрицу и остатки
+    merged = matrix_df.merge(
+        stock_df[['Article', 'Store_ID', 'Current_Stock', 'Model']],
+        on=['Article', 'Store_ID'],
+        how='left'
+    )
     
-    # Анализ
-    missing_items = should_be_items - actual_items  # Должны быть, но нет
-    extra_items = actual_items - should_be_items    # Есть, но не должны быть
-    matching_items = should_be_items & actual_items # Совпадают
+    # Заполняем отсутствующие остатки нулями
+    merged['Current_Stock'] = merged['Current_Stock'].fillna(0)
     
-    # Создаем детальные отчеты с проверкой существования колонок
-    available_cols_should_be = [col for col in ['ART', 'Describe', 'Название_бренда', 'Price:'] if col in should_be_df.columns]
-    available_cols_actual = [col for col in ['Артикул', 'Describe', 'Магазинов с товаром'] if col in actual_df.columns]
+    # Расчет Top of Green (максимальный уровень запаса)
+    merged['Top_of_Green'] = merged['Red_Zone'] + merged['Yellow_Zone'] + merged['Green_Zone']
     
-    missing_df = should_be_df[should_be_df[should_be_describe_col].isin(missing_items)][available_cols_should_be]
+    # Расчет границ зон
+    merged['Red_Zone_Max'] = merged['Red_Zone']
+    merged['Yellow_Zone_Max'] = merged['Red_Zone'] + merged['Yellow_Zone']
+    merged['Green_Zone_Max'] = merged['Top_of_Green']
     
-    extra_df = actual_df[actual_df[actual_describe_col].isin(extra_items)][available_cols_actual]
+    # Определение статуса буфера
+    def get_buffer_status(row):
+        stock = row['Current_Stock']
+        if stock <= row['Red_Zone_Max']:
+            return 'RED'
+        elif stock <= row['Yellow_Zone_Max']:
+            return 'YELLOW'
+        elif stock <= row['Green_Zone_Max']:
+            return 'GREEN'
+        else:
+            return 'EXCESS'  # Излишек
     
-    matching_df = should_be_df[should_be_df[should_be_describe_col].isin(matching_items)][available_cols_should_be]
+    merged['Buffer_Status'] = merged.apply(get_buffer_status, axis=1)
     
-    # Объединяем с данными об остатках если возможно
-    if 'Магазинов с товаром' in actual_df.columns:
-        matching_with_stock = matching_df.merge(
-            actual_df[[actual_describe_col, 'Магазинов с товаром']], 
-            left_on=should_be_describe_col,
-            right_on=actual_describe_col, 
-            how='left'
+    # Расчет процента заполнения буфера
+    merged['Buffer_Fill_Percent'] = (merged['Current_Stock'] / merged['Top_of_Green'] * 100).round(1)
+    
+    # Расчет количества для заказа
+    def calculate_order_qty(row):
+        if row['Buffer_Status'] in ['RED', 'YELLOW']:
+            # Заказываем до Top of Green
+            order_qty = row['Top_of_Green'] - row['Current_Stock']
+            return max(0, order_qty)
+        return 0
+    
+    merged['Order_Qty'] = merged.apply(calculate_order_qty, axis=1)
+    
+    # Приоритет заказа (RED = 1, YELLOW = 2, GREEN = 3, EXCESS = 4)
+    priority_map = {'RED': 1, 'YELLOW': 2, 'GREEN': 3, 'EXCESS': 4}
+    merged['Priority'] = merged['Buffer_Status'].map(priority_map)
+    
+    # Расчет дней до исчерпания запаса (если есть Avg_Daily_Usage)
+    if 'Avg_Daily_Usage' in merged.columns:
+        merged['Avg_Daily_Usage'] = pd.to_numeric(merged['Avg_Daily_Usage'], errors='coerce').fillna(0)
+        merged['Days_Until_Stockout'] = np.where(
+            merged['Avg_Daily_Usage'] > 0,
+            (merged['Current_Stock'] / merged['Avg_Daily_Usage']).round(1),
+            np.inf
         )
     else:
-        matching_with_stock = matching_df
+        merged['Days_Until_Stockout'] = np.nan
     
-    return missing_df, extra_df, matching_with_stock
+    return merged
 
-def create_download_link(df, filename):
-    """Создание ссылки для скачивания Excel файла"""
+
+def generate_order_report(ddmrp_df):
+    """Генерация отчета по заказам"""
+    # Фильтруем только товары, требующие заказа
+    orders = ddmrp_df[ddmrp_df['Order_Qty'] > 0].copy()
+    
+    if orders.empty:
+        return pd.DataFrame()
+    
+    # Сортировка по приоритету и магазину
+    orders = orders.sort_values(['Priority', 'Store_ID', 'Article'])
+    
+    # Выбираем нужные колонки для отчета
+    report_columns = [
+        'Store_ID', 'Article', 'Describe', 'Brand', 'Model',
+        'Current_Stock', 'Top_of_Green', 'Order_Qty', 
+        'Buffer_Status', 'Priority', 'Days_Until_Stockout'
+    ]
+    
+    # Проверяем наличие колонок
+    available_columns = [col for col in report_columns if col in orders.columns]
+    
+    return orders[available_columns].reset_index(drop=True)
+
+
+# ========================
+# ВИЗУАЛИЗАЦИЯ
+# ========================
+
+def create_buffer_status_chart(ddmrp_df):
+    """График распределения статусов буферов"""
+    status_counts = ddmrp_df['Buffer_Status'].value_counts()
+    
+    colors = {
+        'RED': '#FF4444',
+        'YELLOW': '#FFD700',
+        'GREEN': '#44FF44',
+        'EXCESS': '#4444FF'
+    }
+    
+    fig = px.pie(
+        values=status_counts.values,
+        names=status_counts.index,
+        title='Распределение статусов буферов',
+        color=status_counts.index,
+        color_discrete_map=colors
+    )
+    
+    return fig
+
+
+def create_store_summary_chart(ddmrp_df):
+    """График сводки по магазинам"""
+    store_summary = ddmrp_df.groupby(['Store_ID', 'Buffer_Status']).size().reset_index(name='Count')
+    
+    fig = px.bar(
+        store_summary,
+        x='Store_ID',
+        y='Count',
+        color='Buffer_Status',
+        title='Статусы буферов по магазинам',
+        color_discrete_map={
+            'RED': '#FF4444',
+            'YELLOW': '#FFD700',
+            'GREEN': '#44FF44',
+            'EXCESS': '#4444FF'
+        },
+        barmode='stack'
+    )
+    
+    fig.update_layout(xaxis_title='Магазин', yaxis_title='Количество товаров')
+    
+    return fig
+
+
+def create_top_orders_chart(orders_df, top_n=20):
+    """График топ товаров для заказа"""
+    if orders_df.empty:
+        return None
+    
+    top_orders = orders_df.nlargest(top_n, 'Order_Qty')
+    
+    fig = px.bar(
+        top_orders,
+        x='Order_Qty',
+        y='Describe',
+        color='Buffer_Status',
+        title=f'Топ-{top_n} товаров для заказа',
+        orientation='h',
+        color_discrete_map={
+            'RED': '#FF4444',
+            'YELLOW': '#FFD700'
+        }
+    )
+    
+    fig.update_layout(yaxis={'categoryorder': 'total ascending'})
+    
+    return fig
+
+
+# ========================
+# ЭКСПОРТ ДАННЫХ
+# ========================
+
+def create_excel_download(df, filename):
+    """Создание ссылки для скачивания Excel"""
     if df is None or df.empty:
         return ""
     
@@ -130,162 +289,449 @@ def create_download_link(df, filename):
     href = f'<a href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64}" download="{filename}">📥 Скачать {filename}</a>'
     return href
 
-# Streamlit интерфейс
-st.set_page_config(page_title="Система сравнения товаров", layout="wide")
 
-st.title("🏪 Система сравнения товаров магазинов")
-st.markdown("---")
+# ========================
+# STREAMLIT ИНТЕРФЕЙС
+# ========================
 
-# Боковая панель для загрузки данных
-st.sidebar.header("📂 Загрузка данных")
-
-# Google Sheets URL
-google_sheet_url = st.sidebar.text_input(
-    "Google Sheets URL (обязательный ассортимент):",
-    value="https://docs.google.com/spreadsheets/d/1D8hz6ZLo_orDMokYms2lQkO_A3nnYNEFYe-mO1CDcrY/export?format=csv&gid=1286042599"
-)
-
-# Загрузка файла остатков
-uploaded_file = st.sidebar.file_uploader(
-    "Загрузите Excel файл с остатками магазинов",
-    type=['xlsx', 'xls']
-)
-
-# Кнопка для загрузки данных
-if st.sidebar.button("🔄 Загрузить и сравнить данные"):
-    with st.spinner("Загрузка данных..."):
-        # Загрузка обязательного ассортимента
-        should_be_df = download_google_sheet(google_sheet_url)
-        
-        if should_be_df is not None:
-            st.info(f"📋 Загружено из Google Sheets: {len(should_be_df)} строк")
-            st.info(f"Колонки: {list(should_be_df.columns)}")
-        
-        # Загрузка остатков
-        actual_df = None
-        if uploaded_file is not None:
-            try:
-                raw_df = pd.read_excel(uploaded_file)
-                st.info(f"📊 Загружено из Excel: {len(raw_df)} строк")
-                st.info(f"Колонки: {list(raw_df.columns)}")
-                actual_df = process_stock_data(raw_df)
-            except Exception as e:
-                st.error(f"Ошибка при чтении Excel файла: {str(e)}")
-        
-        if should_be_df is not None and actual_df is not None:
-            st.success("✅ Данные успешно загружены!")
-            
-            # Сохраняем данные в session_state
-            st.session_state['should_be_df'] = should_be_df
-            st.session_state['actual_df'] = actual_df
-            
-            # Выполняем сравнение
-            missing_df, extra_df, matching_df = compare_assortment(should_be_df, actual_df)
-            
-            st.session_state['missing_df'] = missing_df
-            st.session_state['extra_df'] = extra_df
-            st.session_state['matching_df'] = matching_df
-        else:
-            st.error("❌ Не удалось загрузить данные")
-
-# Отображение результатов
-if 'should_be_df' in st.session_state and 'actual_df' in st.session_state:
-    should_be_df = st.session_state['should_be_df']
-    actual_df = st.session_state['actual_df']
-    missing_df = st.session_state.get('missing_df')
-    extra_df = st.session_state.get('extra_df')
-    matching_df = st.session_state.get('matching_df')
-    
-    # Основная статистика
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric("📋 Должно быть товаров", len(should_be_df))
-    
-    with col2:
-        st.metric("🏪 Фактически товаров", len(actual_df))
-    
-    with col3:
-        st.metric("❌ Отсутствует товаров", len(missing_df) if missing_df is not None else 0)
-    
-    with col4:
-        st.metric("➕ Лишних товаров", len(extra_df) if extra_df is not None else 0)
-    
+def main():
+    st.title("📊 DDMRP: Система управления остатками")
+    st.markdown("**Динамическое управление буферами запасов по методологии DDMRP**")
     st.markdown("---")
     
-    # Вкладки с результатами
-    tab1, tab2, tab3, tab4 = st.tabs(["❌ Отсутствующие товары", "➕ Лишние товары", "✅ Совпадающие товары", "📊 Сводка"])
+    # ========================
+    # БОКОВАЯ ПАНЕЛЬ
+    # ========================
+    st.sidebar.header("📂 Загрузка данных")
     
-    with tab1:
-        st.subheader("Товары, которых нет в наличии, но должны быть")
-        if missing_df is not None and not missing_df.empty:
-            st.dataframe(missing_df, use_container_width=True)
-            st.markdown(create_download_link(missing_df, "отсутствующие_товары.xlsx"), unsafe_allow_html=True)
-        else:
-            st.success("🎉 Все необходимые товары есть в наличии!")
+    # Google Sheets URL
+    google_sheet_url = st.sidebar.text_input(
+        "Google Sheets URL (торговая матрица):",
+        value="",
+        help="Ссылка на Google Sheets с торговой матрицей"
+    )
     
-    with tab2:
-        st.subheader("Лишние товары (есть в наличии, но не в обязательном ассортименте)")
-        if extra_df is not None and not extra_df.empty:
-            st.dataframe(extra_df, use_container_width=True)
-            st.markdown(create_download_link(extra_df, "лишние_товары.xlsx"), unsafe_allow_html=True)
-        else:
-            st.info("ℹ️ Лишних товаров не найдено")
+    # Загрузка Excel файла
+    uploaded_file = st.sidebar.file_uploader(
+        "Загрузите Excel с остатками",
+        type=['xlsx', 'xls'],
+        help="Файл с фактическими остатками по магазинам"
+    )
     
-    with tab3:
-        st.subheader("Товары, которые совпадают")
-        if matching_df is not None and not matching_df.empty:
-            st.dataframe(matching_df, use_container_width=True)
-            st.markdown(create_download_link(matching_df, "совпадающие_товары.xlsx"), unsafe_allow_html=True)
-        else:
-            st.warning("⚠️ Совпадающих товаров не найдено")
+    # Кнопка загрузки
+    load_button = st.sidebar.button("🔄 Загрузить и рассчитать", type="primary")
     
-    with tab4:
-        st.subheader("📊 Сводная информация")
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 📖 Легенда статусов")
+    st.sidebar.markdown("🔴 **RED** - Критический уровень")
+    st.sidebar.markdown("🟡 **YELLOW** - Требуется заказ")
+    st.sidebar.markdown("🟢 **GREEN** - Норма")
+    st.sidebar.markdown("🔵 **EXCESS** - Излишек")
+    
+    # ========================
+    # ЗАГРУЗКА И ОБРАБОТКА
+    # ========================
+    
+    if load_button:
+        if not google_sheet_url:
+            st.error("❌ Укажите URL Google Sheets")
+            return
         
-        if missing_df is not None and matching_df is not None:
-            total_should_be = len(should_be_df)
-            total_missing = len(missing_df)
-            total_matching = len(matching_df)
+        if uploaded_file is None:
+            st.error("❌ Загрузите Excel файл с остатками")
+            return
+        
+        with st.spinner("⏳ Загрузка данных..."):
+            # Загрузка торговой матрицы
+            matrix_df = download_google_sheet(google_sheet_url)
             
-            coverage_percent = (total_matching / total_should_be * 100) if total_should_be > 0 else 0
+            if matrix_df is not None:
+                st.success(f"✅ Торговая матрица загружена: {len(matrix_df)} строк")
+                
+                # Валидация
+                if not validate_matrix(matrix_df):
+                    return
+                
+                # Загрузка остатков
+                stock_df = load_stock_file(uploaded_file)
+                
+                if stock_df is not None:
+                    st.success(f"✅ Остатки загружены: {len(stock_df)} строк")
+                    
+                    # Расчет DDMRP
+                    with st.spinner("🔄 Расчет буферов DDMRP..."):
+                        ddmrp_df = calculate_ddmrp_status(matrix_df, stock_df)
+                        orders_df = generate_order_report(ddmrp_df)
+                    
+                    # Сохранение в session_state
+                    st.session_state['ddmrp_df'] = ddmrp_df
+                    st.session_state['orders_df'] = orders_df
+                    st.session_state['matrix_df'] = matrix_df
+                    st.session_state['stock_df'] = stock_df
+                    
+                    st.success("✅ Расчеты выполнены успешно!")
+    
+    # ========================
+    # ОТОБРАЖЕНИЕ РЕЗУЛЬТАТОВ
+    # ========================
+    
+    if 'ddmrp_df' in st.session_state:
+        ddmrp_df = st.session_state['ddmrp_df']
+        orders_df = st.session_state['orders_df']
+        
+        # ========================
+        # КЛЮЧЕВЫЕ МЕТРИКИ
+        # ========================
+        
+        col1, col2, col3, col4, col5 = st.columns(5)
+        
+        with col1:
+            total_items = len(ddmrp_df)
+            st.metric("📦 Всего позиций", total_items)
+        
+        with col2:
+            red_count = len(ddmrp_df[ddmrp_df['Buffer_Status'] == 'RED'])
+            st.metric("🔴 Критичных", red_count)
+        
+        with col3:
+            yellow_count = len(ddmrp_df[ddmrp_df['Buffer_Status'] == 'YELLOW'])
+            st.metric("🟡 Требуют заказа", yellow_count)
+        
+        with col4:
+            green_count = len(ddmrp_df[ddmrp_df['Buffer_Status'] == 'GREEN'])
+            st.metric("🟢 В норме", green_count)
+        
+        with col5:
+            total_order_qty = orders_df['Order_Qty'].sum() if not orders_df.empty else 0
+            st.metric("📋 К заказу (шт)", f"{int(total_order_qty)}")
+        
+        st.markdown("---")
+        
+        # ========================
+        # ВКЛАДКИ
+        # ========================
+        
+        tab1, tab2, tab3, tab4, tab5 = st.tabs([
+            "📋 Заказы",
+            "📊 Все товары",
+            "🏪 По магазинам",
+            "📈 Аналитика",
+            "⚙️ Детали расчета"
+        ])
+        
+        # ========================
+        # TAB 1: ЗАКАЗЫ
+        # ========================
+        with tab1:
+            st.subheader("📋 Список товаров для заказа")
             
-            st.metric("📈 Покрытие ассортимента", f"{coverage_percent:.1f}%")
+            if not orders_df.empty:
+                # Фильтры
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    selected_stores = st.multiselect(
+                        "Фильтр по магазинам:",
+                        options=sorted(orders_df['Store_ID'].unique()),
+                        default=sorted(orders_df['Store_ID'].unique())
+                    )
+                
+                with col2:
+                    selected_status = st.multiselect(
+                        "Фильтр по статусу:",
+                        options=['RED', 'YELLOW'],
+                        default=['RED', 'YELLOW']
+                    )
+                
+                # Применение фильтров
+                filtered_orders = orders_df[
+                    (orders_df['Store_ID'].isin(selected_stores)) &
+                    (orders_df['Buffer_Status'].isin(selected_status))
+                ]
+                
+                st.dataframe(
+                    filtered_orders,
+                    use_container_width=True,
+                    hide_index=True
+                )
+                
+                # Скачивание
+                st.markdown(
+                    create_excel_download(filtered_orders, f"orders_{datetime.now().strftime('%Y%m%d')}.xlsx"),
+                    unsafe_allow_html=True
+                )
+                
+                # График топ заказов
+                st.markdown("---")
+                fig = create_top_orders_chart(filtered_orders)
+                if fig:
+                    st.plotly_chart(fig, use_container_width=True)
+                
+            else:
+                st.success("🎉 Все товары в норме! Заказов не требуется.")
+        
+        # ========================
+        # TAB 2: ВСЕ ТОВАРЫ
+        # ========================
+        with tab2:
+            st.subheader("📊 Полный список товаров и статусы буферов")
             
-            # График покрытия
-            import plotly.express as px
+            # Фильтры
+            col1, col2, col3 = st.columns(3)
             
-            coverage_data = pd.DataFrame({
-                'Статус': ['Есть в наличии', 'Отсутствует'],
-                'Количество': [total_matching, total_missing],
-                'Процент': [coverage_percent, 100 - coverage_percent]
+            with col1:
+                filter_stores = st.multiselect(
+                    "Магазины:",
+                    options=sorted(ddmrp_df['Store_ID'].unique()),
+                    default=sorted(ddmrp_df['Store_ID'].unique()),
+                    key='all_stores'
+                )
+            
+            with col2:
+                filter_status = st.multiselect(
+                    "Статус буфера:",
+                    options=['RED', 'YELLOW', 'GREEN', 'EXCESS'],
+                    default=['RED', 'YELLOW', 'GREEN', 'EXCESS'],
+                    key='all_status'
+                )
+            
+            with col3:
+                search_article = st.text_input("Поиск по артикулу/описанию:")
+            
+            # Применение фильтров
+            filtered_all = ddmrp_df[
+                (ddmrp_df['Store_ID'].isin(filter_stores)) &
+                (ddmrp_df['Buffer_Status'].isin(filter_status))
+            ]
+            
+            if search_article:
+                filtered_all = filtered_all[
+                    filtered_all['Article'].str.contains(search_article, case=False, na=False) |
+                    filtered_all['Describe'].str.contains(search_article, case=False, na=False)
+                ]
+            
+            st.dataframe(
+                filtered_all,
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            st.markdown(
+                create_excel_download(filtered_all, f"all_items_{datetime.now().strftime('%Y%m%d')}.xlsx"),
+                unsafe_allow_html=True
+            )
+        
+        # ========================
+        # TAB 3: ПО МАГАЗИНАМ
+        # ========================
+        with tab3:
+            st.subheader("🏪 Анализ по магазинам")
+            
+            # Выбор магазина
+            selected_store = st.selectbox(
+                "Выберите магазин:",
+                options=sorted(ddmrp_df['Store_ID'].unique())
+            )
+            
+            store_data = ddmrp_df[ddmrp_df['Store_ID'] == selected_store]
+            
+            # Метрики магазина
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric("Всего SKU", len(store_data))
+            
+            with col2:
+                red_store = len(store_data[store_data['Buffer_Status'] == 'RED'])
+                st.metric("🔴 Критичных", red_store)
+            
+            with col3:
+                yellow_store = len(store_data[store_data['Buffer_Status'] == 'YELLOW'])
+                st.metric("🟡 Требуют заказа", yellow_store)
+            
+            with col4:
+                order_qty_store = store_data['Order_Qty'].sum()
+                st.metric("К заказу (шт)", int(order_qty_store))
+            
+            st.markdown("---")
+            
+            # Таблица товаров магазина
+            st.dataframe(
+                store_data,
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            st.markdown(
+                create_excel_download(store_data, f"store_{selected_store}_{datetime.now().strftime('%Y%m%d')}.xlsx"),
+                unsafe_allow_html=True
+            )
+        
+        # ========================
+        # TAB 4: АНАЛИТИКА
+        # ========================
+        with tab4:
+            st.subheader("📈 Аналитические графики")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # График распределения статусов
+                fig1 = create_buffer_status_chart(ddmrp_df)
+                st.plotly_chart(fig1, use_container_width=True)
+            
+            with col2:
+                # График по магазинам
+                fig2 = create_store_summary_chart(ddmrp_df)
+                st.plotly_chart(fig2, use_container_width=True)
+            
+            # Дополнительная аналитика
+            if 'ABC_Class' in ddmrp_df.columns:
+                st.markdown("---")
+                st.subheader("ABC-анализ")
+                
+                abc_status = ddmrp_df.groupby(['ABC_Class', 'Buffer_Status']).size().reset_index(name='Count')
+                
+                fig3 = px.bar(
+                    abc_status,
+                    x='ABC_Class',
+                    y='Count',
+                    color='Buffer_Status',
+                    title='Статусы буферов по ABC-классам',
+                    color_discrete_map={
+                        'RED': '#FF4444',
+                        'YELLOW': '#FFD700',
+                        'GREEN': '#44FF44',
+                        'EXCESS': '#4444FF'
+                    },
+                    barmode='group'
+                )
+                
+                st.plotly_chart(fig3, use_container_width=True)
+        
+        # ========================
+        # TAB 5: ДЕТАЛИ РАСЧЕТА
+        # ========================
+        with tab5:
+            st.subheader("⚙️ Методология расчета DDMRP")
+            
+            st.markdown("""
+            ### Зоны буфера:
+            
+            - **🔴 Красная зона (Red Zone)**: Критический минимум запаса
+                - Ниже этого уровня - срочный заказ!
+                
+            - **🟡 Желтая зона (Yellow Zone)**: Зона пополнения
+                - Время сделать заказ
+                
+            - **🟢 Зеленая зона (Green Zone)**: Целевой запас
+                - Нормальный уровень запаса
+                
+            - **🔵 Излишек (Excess)**: Запас выше Top of Green
+                - Возможен избыточный запас
+            
+            ### Расчет Top of Green:
+            ```
+            Top of Green = Red Zone + Yellow Zone + Green Zone
+            ```
+            
+            ### Расчет количества для заказа:
+            ```
+            Order Qty = Top of Green - Current Stock
+            ```
+            (только для RED и YELLOW статусов)
+            
+            ### Приоритеты:
+            1. 🔴 RED - Максимальный приоритет
+            2. 🟡 YELLOW - Высокий приоритет
+            3. 🟢 GREEN - Норма (заказ не требуется)
+            4. 🔵 EXCESS - Излишек (заказ не требуется)
+            """)
+            
+            # Пример расчета
+            st.markdown("---")
+            st.subheader("📝 Пример расчета")
+            
+            example_data = {
+                'Параметр': ['Red Zone', 'Yellow Zone', 'Green Zone', 'Top of Green', 'Текущий остаток', 'Статус', 'К заказу'],
+                'Значение': ['10 шт', '20 шт', '30 шт', '60 шт', '15 шт', '🟡 YELLOW', '45 шт (60 - 15)']
+            }
+            
+            st.table(pd.DataFrame(example_data))
+    
+    else:
+        # ========================
+        # НАЧАЛЬНЫЙ ЭКРАН
+        # ========================
+        st.info("👆 Загрузите данные через боковую панель для начала работы")
+        
+        with st.expander("📖 Инструкция по использованию"):
+            st.markdown("""
+            ### Как использовать систему:
+            
+            1. **Подготовьте торговую матрицу** в Google Sheets со следующими колонками:
+               - `Article` - Артикул товара ⚠️
+               - `Describe` - Описание товара ⚠️
+               - `Store_ID` - Номер магазина (6, 9, 10...) ⚠️
+               - `Red_Zone` - Красная зона (шт) ⚠️
+               - `Yellow_Zone` - Желтая зона (шт) ⚠️
+               - `Green_Zone` - Зеленая зона (шт) ⚠️
+               - `Brand` - Бренд (опционально)
+               - `Avg_Daily_Usage` - Средний расход/день (опционально)
+               - `ABC_Class` - ABC-класс (опционально)
+               - и другие...
+            
+            2. **Подготовьте файл остатков** в Excel с колонками:
+               - `Art` → будет переименовано в `Article` ⚠️
+               - `Magazin` → будет переименовано в `Store_ID` ⚠️
+               - `Describe` - Описание ⚠️
+               - `к-во` → будет переименовано в `Current_Stock` ⚠️
+               - `Model` - Модель (опционально)
+            
+            3. **Вставьте URL** Google Sheets в боковую панель
+            
+            4. **Загрузите Excel** файл с остатками
+            
+            5. **Нажмите "Загрузить и рассчитать"**
+            
+            6. **Анализируйте результаты** во вкладках:
+               - 📋 Заказы - список товаров для заказа
+               - 📊 Все товары - полный список с буферами
+               - 🏪 По магазинам - анализ по каждому магазину
+               - 📈 Аналитика - графики и визуализация
+               - ⚙️ Детали расчета - методология DDMRP
+            
+            ### Преимущества DDMRP:
+            - ✅ Динамическое управление запасами
+            - ✅ Снижение дефицита и излишков
+            - ✅ Приоритизация заказов
+            - ✅ Визуализация статусов
+            - ✅ Автоматический расчет количества для заказа
+            """)
+        
+        with st.expander("🎯 Пример структуры данных"):
+            st.markdown("#### Торговая матрица (Google Sheets):")
+            example_matrix = pd.DataFrame({
+                'Article': ['ART001', 'ART002', 'ART003'],
+                'Describe': ['Молоко 3.2% 1л', 'Хлеб белый', 'Масло сливочное'],
+                'Store_ID': ['6', '6', '9'],
+                'Red_Zone': [10, 15, 5],
+                'Yellow_Zone': [20, 25, 10],
+                'Green_Zone': [30, 35, 15],
+                'Brand': ['Простоквашино', 'Хлебный дом', 'Вологодское']
             })
+            st.dataframe(example_matrix, use_container_width=True)
             
-            fig = px.pie(coverage_data, values='Количество', names='Статус', 
-                        title="Покрытие обязательного ассортимента")
-            st.plotly_chart(fig, use_container_width=True)
+            st.markdown("#### Остатки (Excel):")
+            example_stock = pd.DataFrame({
+                'Art': ['ART001', 'ART002', 'ART003'],
+                'Magazin': ['6', '6', '9'],
+                'Describe': ['Молоко 3.2% 1л', 'Хлеб белый', 'Масло сливочное'],
+                'к-во': [8, 45, 12],
+                'Model': ['VPL 932', 'RB 4534', 'VOL 123']
+            })
+            st.dataframe(example_stock, use_container_width=True)
 
-else:
-    st.info("👆 Загрузите данные через боковую панель для начала анализа")
-    
-    # Инструкция
-    with st.expander("📖 Инструкция по использованию"):
-        st.markdown("""
-        ### Как использовать систему:
-        
-        1. **Google Sheets URL**: Укажите ссылку на таблицу с обязательным ассортиментом
-           - Таблица должна содержать колонку 'Describe'
-           
-        2. **Excel файл**: Загрузите файл с остатками товаров в магазинах
-           - Файл должен содержать колонки: 'Артикул', 'Describe' и колонки магазинов
-           
-        3. **Нажмите "Загрузить и сравнить данные"**
-        
-        4. **Анализируйте результаты** в соответствующих вкладках
-        
-        ### Результаты анализа:
-        - **Отсутствующие товары**: Товары из обязательного ассортимента, которых нет в магазинах
-        - **Лишние товары**: Товары в магазинах, которых нет в обязательном ассортименте  
-        - **Совпадающие товары**: Товары, которые есть и в ассортименте, и в магазинах
-        - **Сводка**: Общая статистика и визуализация покрытия
-        """)
+
+if __name__ == "__main__":
+    main()
