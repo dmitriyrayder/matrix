@@ -119,6 +119,13 @@ def calculate_ddmrp_status(matrix_df, stock_df):
     # Заполняем отсутствующие остатки нулями
     merged['Current_Stock'] = merged['Current_Stock'].fillna(0)
     
+    # Расчет стоимости остатков (Retail_Price * Current_Stock)
+    if 'Retail_Price' in merged.columns:
+        merged['Retail_Price'] = pd.to_numeric(merged['Retail_Price'], errors='coerce').fillna(0)
+        merged['Stock_Value'] = merged['Retail_Price'] * merged['Current_Stock']
+    else:
+        merged['Stock_Value'] = 0
+    
     # Расчет Top of Green (максимальный уровень запаса)
     merged['Top_of_Green'] = merged['Red_Zone'] + merged['Yellow_Zone'] + merged['Green_Zone']
     
@@ -186,7 +193,7 @@ def generate_order_report(ddmrp_df):
     # Выбираем нужные колонки для отчета
     report_columns = [
         'Store_ID', 'Article', 'Describe', 'Brand', 'Model',
-        'Current_Stock', 'Top_of_Green', 'Order_Qty', 
+        'Current_Stock', 'Stock_Value', 'Top_of_Green', 'Order_Qty', 
         'Buffer_Status', 'Priority', 'Days_Until_Stockout'
     ]
     
@@ -383,7 +390,7 @@ def main():
         # КЛЮЧЕВЫЕ МЕТРИКИ
         # ========================
         
-        col1, col2, col3, col4, col5 = st.columns(5)
+        col1, col2, col3, col4, col5, col6 = st.columns(6)
         
         with col1:
             total_items = len(ddmrp_df)
@@ -404,6 +411,10 @@ def main():
         with col5:
             total_order_qty = orders_df['Order_Qty'].sum() if not orders_df.empty else 0
             st.metric("📋 К заказу (шт)", f"{int(total_order_qty)}")
+        
+        with col6:
+            total_stock_value = ddmrp_df['Stock_Value'].sum() if 'Stock_Value' in ddmrp_df.columns else 0
+            st.metric("💰 Остатки (₴)", f"{total_stock_value:,.0f}")
         
         st.markdown("---")
         
@@ -536,7 +547,7 @@ def main():
             store_data = ddmrp_df[ddmrp_df['Store_ID'] == selected_store]
             
             # Метрики магазина
-            col1, col2, col3, col4 = st.columns(4)
+            col1, col2, col3, col4, col5 = st.columns(5)
             
             with col1:
                 st.metric("Всего SKU", len(store_data))
@@ -552,6 +563,10 @@ def main():
             with col4:
                 order_qty_store = store_data['Order_Qty'].sum()
                 st.metric("К заказу (шт)", int(order_qty_store))
+            
+            with col5:
+                store_value = store_data['Stock_Value'].sum() if 'Stock_Value' in store_data.columns else 0
+                st.metric("💰 Остатки (₴)", f"{store_value:,.0f}")
             
             st.markdown("---")
             
@@ -584,6 +599,43 @@ def main():
                 # График по магазинам
                 fig2 = create_store_summary_chart(ddmrp_df)
                 st.plotly_chart(fig2, use_container_width=True)
+            
+            # График стоимости остатков по магазинам
+            if 'Stock_Value' in ddmrp_df.columns:
+                st.markdown("---")
+                st.subheader("💰 Стоимость остатков по магазинам")
+                
+                store_value_summary = ddmrp_df.groupby('Store_ID')['Stock_Value'].sum().reset_index()
+                store_value_summary = store_value_summary.sort_values('Stock_Value', ascending=False)
+                
+                fig_value = px.bar(
+                    store_value_summary,
+                    x='Store_ID',
+                    y='Stock_Value',
+                    title='Стоимость остатков по магазинам (₴)',
+                    labels={'Stock_Value': 'Сумма (₴)', 'Store_ID': 'Магазин'},
+                    text='Stock_Value'
+                )
+                
+                fig_value.update_traces(texttemplate='%{text:,.0f}₴', textposition='outside')
+                fig_value.update_layout(xaxis_title='Магазин', yaxis_title='Стоимость остатков (₴)')
+                
+                st.plotly_chart(fig_value, use_container_width=True)
+                
+                # Таблица с детализацией
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.dataframe(
+                        store_value_summary.style.format({'Stock_Value': '{:,.0f}₴'}),
+                        use_container_width=True,
+                        hide_index=True
+                    )
+                
+                with col2:
+                    total_value = store_value_summary['Stock_Value'].sum()
+                    st.metric("💰 Общая сумма остатков", f"{total_value:,.0f}₴")
+                    avg_value = store_value_summary['Stock_Value'].mean()
+                    st.metric("📊 Средняя сумма на магазин", f"{avg_value:,.0f}₴")
             
             # Дополнительная аналитика
             if 'ABC_Class' in ddmrp_df.columns:
