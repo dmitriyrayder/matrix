@@ -10,7 +10,10 @@
 
 **Содержимое:**
 - 60 строк (20 товаров × 3 магазина)
-- Колонки: Article, Describe, Store_ID, Red_Zone, Yellow_Zone, Green_Zone, Brand, Retail_Price, Avg_Daily_Usage, ABC_Class
+- Колонки: Article, Describe, Store_ID, Red_Zone, Yellow_Zone, Green_Zone, Brand, Retail_Price, Avg_Daily_Usage, ABC_Class, Segment
+
+**Описание колонок:**
+- `Segment` - Сегмент товара (текстовое поле, может быть пустым). Примеры: "Молочні продукти", "Хлібобулочні", "Бакалія", "Напої", "М'ясні вироби", "Кондитерські вироби"
 
 **Как использовать:**
 1. Откройте Google Sheets (https://sheets.google.com)
