@@ -348,6 +348,66 @@ def download_google_sheet(sheet_url, max_retries=3):
                         st.error("❌ Google Sheets содержит недостаточно данных")
                         return None
 
+                    # Очистка названий колонок от пробелов
+                    df.columns = df.columns.str.strip()
+
+                    # Вывод информации о найденных колонках для отладки
+                    st.info(f"📋 Найденные колонки в Google Sheets: {', '.join(df.columns.tolist())}")
+
+                    # Маппинг альтернативных названий колонок
+                    column_mapping = {
+                        'article': 'Article',
+                        'ARTICLE': 'Article',
+                        'Артикул': 'Article',
+                        'артикул': 'Article',
+                        'describe': 'Describe',
+                        'DESCRIBE': 'Describe',
+                        'Description': 'Describe',
+                        'Описание': 'Describe',
+                        'описание': 'Describe',
+                        'Store_ID': 'Store_ID',
+                        'store_id': 'Store_ID',
+                        'STORE_ID': 'Store_ID',
+                        'Magazin': 'Store_ID',
+                        'magazin': 'Store_ID',
+                        'Магазин': 'Store_ID',
+                        'магазин': 'Store_ID',
+                        'Red_Zone': 'Red_Zone',
+                        'red_zone': 'Red_Zone',
+                        'RED_ZONE': 'Red_Zone',
+                        'RedZone': 'Red_Zone',
+                        'Yellow_Zone': 'Yellow_Zone',
+                        'yellow_zone': 'Yellow_Zone',
+                        'YELLOW_ZONE': 'Yellow_Zone',
+                        'YellowZone': 'Yellow_Zone',
+                        'Green_Zone': 'Green_Zone',
+                        'green_zone': 'Green_Zone',
+                        'GREEN_ZONE': 'Green_Zone',
+                        'GreenZone': 'Green_Zone',
+                        'Brand': 'Brand',
+                        'brand': 'Brand',
+                        'Бренд': 'Brand',
+                        'бренд': 'Brand',
+                        'Retail_Price': 'Retail_Price',
+                        'retail_price': 'Retail_Price',
+                        'Price': 'Retail_Price',
+                        'price': 'Retail_Price',
+                        'Цена': 'Retail_Price',
+                        'цена': 'Retail_Price',
+                        'Avg_Daily_Usage': 'Avg_Daily_Usage',
+                        'avg_daily_usage': 'Avg_Daily_Usage',
+                        'ABC_Class': 'ABC_Class',
+                        'abc_class': 'ABC_Class',
+                        'ABC': 'ABC_Class',
+                        'Model': 'Model',
+                        'model': 'Model',
+                        'Модель': 'Model',
+                        'модель': 'Model'
+                    }
+
+                    # Применение маппинга
+                    df = df.rename(columns=column_mapping)
+
                     st.success(f"✅ Загружено {len(df)} строк из Google Sheets")
                     return df
 
@@ -532,12 +592,17 @@ def load_stock_file(uploaded_file):
 
 def validate_matrix(df):
     """Валидация торговой матрицы с улучшенной проверкой данных"""
+
+    # Создаем копию для безопасной обработки
+    df = df.copy()
+
     required_cols = ['Article', 'Describe', 'Store_ID', 'Red_Zone', 'Yellow_Zone', 'Green_Zone']
     missing_cols = [col for col in required_cols if col not in df.columns]
 
     if missing_cols:
         st.error(f"❌ В торговой матрице отсутствуют колонки: {', '.join(missing_cols)}")
-        return False
+        st.info(f"💡 Доступные колонки: {', '.join(df.columns.tolist())}")
+        return None
 
     # Проверка типов данных
     df['Red_Zone'] = pd.to_numeric(df['Red_Zone'], errors='coerce')
@@ -591,7 +656,8 @@ def validate_matrix(df):
     if empty_stores > 0:
         st.warning(f"⚠️ Найдено {empty_stores} пустых номеров магазинов")
 
-    return True
+    st.success(f"✅ Торговая матрица валидирована: {len(df)} строк")
+    return df
 
 
 # ========================
@@ -902,21 +968,23 @@ def main():
             matrix_df = download_google_sheet(google_sheet_url)
             
             if matrix_df is not None:
-                st.success(f"✅ Торговая матрица загружена: {len(matrix_df)} строк")
-                
-                # Валидация
-                if not validate_matrix(matrix_df):
+                # Валидация и обработка торговой матрицы
+                matrix_df = validate_matrix(matrix_df)
+
+                if matrix_df is None:
                     return
-                
+
                 # Загрузка остатков
                 stock_df = load_stock_file(uploaded_file)
-                
+
                 if stock_df is not None:
-                    st.success(f"✅ Остатки загружены: {len(stock_df)} строк")
-                    
                     # Расчет DDMRP
                     with st.spinner("🔄 Расчет буферов DDMRP..."):
                         ddmrp_df = calculate_ddmrp_status(matrix_df, stock_df)
+
+                        if ddmrp_df is None:
+                            return
+
                         orders_df = generate_order_report(ddmrp_df)
                     
                     # Сохранение в session_state
