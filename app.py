@@ -402,7 +402,16 @@ def download_google_sheet(sheet_url, max_retries=3):
                         'Model': 'Model',
                         'model': 'Model',
                         'Модель': 'Model',
-                        'модель': 'Model'
+                        'модель': 'Model',
+                        'Segment': 'Segment',
+                        'segment': 'Segment',
+                        'SEGMENT': 'Segment',
+                        'Сегмент': 'Segment',
+                        'сегмент': 'Segment',
+                        'Category': 'Segment',
+                        'category': 'Segment',
+                        'Категорія': 'Segment',
+                        'категорія': 'Segment'
                     }
 
                     # Применение маппинга
